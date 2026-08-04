@@ -59,3 +59,34 @@ skip() {
     printf '    SKIP: %s\n' "$1"
     return 0
 }
+
+# Reads a value out of a JSON document by dotted path, e.g. 'device.name' or
+# 'device.identifiers.0'.
+#
+# Python is used only here, in the test suite. It is deliberately NOT used by
+# anything that runs on a monitored node -- the whole point of the agent is
+# installing with no dependencies. Parsing JSON with a real parser rather than
+# grep means these tests check the actual structure, so a payload that merely
+# happens to contain the right substring cannot pass.
+json_get() {
+    local document=$1 path=$2
+    printf '%s' "$document" | python3 -c '
+import json, sys
+
+path = sys.argv[1]
+value = json.load(sys.stdin)
+
+for part in path.split("."):
+    if isinstance(value, list):
+        value = value[int(part)]
+    else:
+        value = value[part]
+
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    print("null")
+else:
+    print(value)
+' "$path" 2>/dev/null
+}

@@ -262,12 +262,24 @@ mqtt_disconnect() {
 }
 
 mqtt_close() {
-    [[ -n $MQTT_FD_OUT ]] && exec {MQTT_FD_OUT}>&- 2>/dev/null
+    # The braces are load-bearing. A bare `exec` with only redirections applies
+    # them permanently to the current shell, so `exec {fd}>&- 2>/dev/null` would
+    # not merely silence a failed close -- it would send the whole script's
+    # stderr to /dev/null from here on. That silently swallowed every log line
+    # and every subsequent error message on a successful publish. Wrapping in a
+    # group scopes the stderr redirection to the group instead.
+    if [[ -n $MQTT_FD_OUT ]]; then
+        { exec {MQTT_FD_OUT}>&-; } 2>/dev/null
+    fi
+
     if [[ $MQTT_TLS_ACTIVE == 1 ]]; then
-        [[ -n $MQTT_FD_IN ]] && exec {MQTT_FD_IN}<&- 2>/dev/null
+        if [[ -n $MQTT_FD_IN ]]; then
+            { exec {MQTT_FD_IN}<&-; } 2>/dev/null
+        fi
         [[ -n ${MQTT_TLS_CO_PID:-} ]] && kill "$MQTT_TLS_CO_PID" 2>/dev/null
         MQTT_TLS_ACTIVE=0
     fi
+
     MQTT_FD_OUT=""
     MQTT_FD_IN=""
     return 0

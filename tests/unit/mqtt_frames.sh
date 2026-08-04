@@ -101,6 +101,23 @@ test_connack_messages_are_human_readable() {
     assert_contains "$(mqtt_connack_message 0)" "accepted" || return 1
 }
 
+test_closing_the_connection_does_not_silence_the_shells_stderr() {
+    # Regression guard. mqtt_close used `exec {fd}>&- 2>/dev/null`, but a bare
+    # `exec` applies its redirections permanently to the current shell, so that
+    # sent all subsequent stderr to /dev/null. Every log line and every error
+    # message after a successful publish silently disappeared -- the agent
+    # looked like it was doing nothing while working perfectly.
+    local output
+    output=$(
+        {
+            mqtt_close
+            printf 'stderr-still-works\n' >&2
+        } 2>&1
+    )
+    assert_contains "$output" "stderr-still-works" \
+        "mqtt_close must not redirect the caller's stderr" || return 1
+}
+
 test_connect_to_closed_port_fails_without_hanging() {
     # A monitored node must fail fast rather than wedge the systemd timer.
     # Port 1 is reserved and never listening.
