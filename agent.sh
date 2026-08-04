@@ -95,7 +95,15 @@ write_published_entities() {
 connect_or_die() {
     [[ -n $MQTT_HOST ]] || die "MQTT_HOST is not set"
 
-    if ! mqtt_connect "$MQTT_HOST" "$MQTT_PORT" "nodemon-${NODE_ID}" \
+    # The client ID includes the PID because MQTT requires it to be unique per
+    # connection: when a second client connects with an ID already in use, the
+    # broker disconnects the first one. Two overlapping runs -- a manual
+    # `systemctl start` alongside a timer firing, or the installer's first
+    # publish racing the timer it just enabled -- would otherwise kick each
+    # other off mid-publish, losing readings while both appeared to succeed
+    # (a QoS 0 publish into a socket the broker has already closed reports no
+    # error). Sessions are clean and QoS is 0, so a per-run ID costs nothing.
+    if ! mqtt_connect "$MQTT_HOST" "$MQTT_PORT" "nodemon-${NODE_ID}-$$" \
         "$MQTT_USERNAME" "$MQTT_PASSWORD" "$MQTT_TLS"; then
         die "MQTT: ${mqtt_last_error}"
     fi

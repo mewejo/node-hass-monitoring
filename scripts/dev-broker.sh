@@ -4,7 +4,7 @@
 # Uses the same tests/broker/mosquitto.conf in both places, so a local test pass
 # means a CI pass. Nothing here ships to monitored nodes — this is dev tooling.
 #
-# Usage: scripts/dev-broker.sh {up|down|logs|sub|status}
+# Usage: scripts/dev-broker.sh {up|down|logs|follow|sub|status}
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -103,7 +103,10 @@ cmd_down() {
     echo "==> broker stopped"
 }
 
-cmd_logs() { docker_cmd logs -f "$CONTAINER"; }
+# Non-following by default so this is safe to call from CI, where `logs -f`
+# would simply hang the job until it timed out.
+cmd_logs() { docker_cmd logs "$CONTAINER"; }
+cmd_follow() { docker_cmd logs -f "$CONTAINER"; }
 cmd_status() { docker_cmd ps --filter "name=${CONTAINER}"; }
 
 # Tail every topic, so you can watch the agent publish in real time.
@@ -116,10 +119,11 @@ case "${1:-}" in
 up) cmd_up ;;
 down) cmd_down ;;
 logs) cmd_logs ;;
+follow) cmd_follow ;;
 sub) cmd_sub ;;
 status) cmd_status ;;
 *)
-    echo "usage: $0 {up|down|logs|sub|status}" >&2
+    echo "usage: $0 {up|down|logs|follow|sub|status}" >&2
     exit 2
     ;;
 esac

@@ -66,6 +66,14 @@ die() {
 # Everything checked here ships with any systemd Linux. Nothing is installed.
 # ---------------------------------------------------------------------------
 
+# True when run from a repo checkout, where the agent sources are already on
+# disk next to this script and nothing needs downloading.
+running_from_checkout() {
+    local source_dir
+    source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || return 1
+    [[ -f "${source_dir}/agent.sh" && -f "${source_dir}/lib/mqtt.sh" ]]
+}
+
 check_prerequisites() {
     step "Checking prerequisites"
 
@@ -105,8 +113,13 @@ check_prerequisites() {
         command -v systemctl >/dev/null 2>&1 || die "systemd is required"
     fi
 
-    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 ||
-        die "need curl or wget to download the agent"
+    # Only needed to fetch the agent. Running from a clone (or from the piped
+    # installer with the repo already present) downloads nothing, and demanding
+    # a downloader there would block a perfectly valid install on a minimal box.
+    if ! running_from_checkout; then
+        command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 ||
+            die "need curl or wget to download the agent"
+    fi
 
     ok "bash ${BASH_VERSION%%(*} with /dev/tcp, systemd, coreutils"
 }
@@ -314,13 +327,11 @@ install_files() {
 
     local source_dir
     source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    local from_checkout=0
-    [[ -f "${source_dir}/agent.sh" && -f "${source_dir}/lib/mqtt.sh" ]] && from_checkout=1
 
     mkdir -p "${DESTDIR}${INSTALL_DIR}/lib" "${DESTDIR}${CONFIG_DIR}" "${DESTDIR}${STATE_DIR}"
 
     local file
-    if ((from_checkout)); then
+    if running_from_checkout; then
         install -m 0755 "${source_dir}/agent.sh" "${DESTDIR}${INSTALL_DIR}/agent.sh"
         for file in mqtt sensors discovery; do
             install -m 0644 "${source_dir}/lib/${file}.sh" "${DESTDIR}${INSTALL_DIR}/lib/${file}.sh"

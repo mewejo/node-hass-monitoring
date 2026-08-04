@@ -1,0 +1,160 @@
+name: test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Syntax check every script
+        run: |
+          status=0
+          while IFS= read -r file; do
+            bash -n "$file" || { echo "syntax error: $file"; status=1; }
+          done < <(find . -name '*.sh' -not -path './.git/*')
+          exit $status
+
+      - name: shellcheck
+        run: shellcheck --severity=warning --external-sources $(find . -name '*.sh' -not -path './.git/*')
+
+      - name: Check for committed secrets
+        # This is a public repo. The installer prompts for the broker password
+        # and writes it on the node; nothing environment-specific should ever
+        # be committed. The test broker's dummy credentials are the one
+        # deliberate exception and live only in scripts/dev-broker.sh.
+        run: |
+          if git grep -nIE '(password|passwd|secret|token)[[:space:]]*=[[:space:]]*["'"'"']?[A-Za-z0-9_-]{8,}' \
+              -- . ':!scripts/dev-broker.sh' ':!tests/' ':!.github/'; then
+            echo "::error::possible committed credential"
+            exit 1
+          fi
+          if [ -e tests/broker/passwd ] || [ -d tests/broker/certs ]; then
+            echo "::error::generated broker credentials must not be committed"
+            exit 1
+          fi
+
+  # The agent has to run on whatever distro a node happens to be. This matrix
+  # exists to catch the cross-distro assumptions the design depends on -- the
+  # nologin path differs between Debian and Arch, `hostname` is not installed by
+  # default on Arch, and bash must have /dev/tcp compiled in. None of that needs
+  # a broker, so these stay fast.
+  unit:
+    name: unit (${{ matrix.distro }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.distro }}
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - debian:stable
+          - ubuntu:latest
+          - archlinux:latest
+    steps:
+      - name: Install test prerequisites
+        # Python and git are for the test harness only. Nothing here is
+        # required by the agent itself -- that is the entire point of the
+        # project, and the "no dependencies" claim is asserted in its own job
+        # below rather than assumed.
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get update -qq
+            apt-get install -y -qq python3 git ca-certificates
+          elif command -v pacman >/dev/null; then
+            pacman -Sy --noconfirm --quiet python git
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          echo "distro:  $(. /etc/os-release && echo "$PRETTY_NAME")"
+          echo "bash:    $BASH_VERSION"
+          echo "nologin: $(command -v nologin || echo '(not in PATH)')"
+          echo "hostname binary: $(command -v hostname || echo '(absent - uname -n is used instead)')"
+
+      - name: Verify bash has /dev/tcp support
+        run: |
+          probe=$(bash -c 'exec 3<>/dev/tcp/127.0.0.1/1' 2>&1 || true)
+          case "$probe" in
+            *"No such file"*|*"not supported"*)
+              echo "::error::bash lacks /dev/tcp support on ${{ matrix.distro }}"
+              exit 1 ;;
+          esac
+          echo "ok: $probe"
+
+      - name: Run unit tests
+        run: ./tests/run.sh unit
+
+  # Guards the core promise: the agent must run on a node with no packages
+  # installed beyond a base system. Anything that creeps in as a dependency
+  # fails here rather than on someone's Proxmox box.
+  no-dependencies:
+    name: no extra dependencies
+    runs-on: ubuntu-latest
+    container: debian:stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm no MQTT client is present
+        run: |
+          for cmd in mosquitto_pub mosquitto_sub python3 python perl nc socat curl; do
+            if command -v "$cmd" >/dev/null; then
+              echo "note: $cmd exists in this image but must not be required"
+            fi
+          done
+          # Remove the obvious candidates so a hidden dependency cannot hide.
+          apt-get remove -y -qq curl 2>/dev/null || true
+
+      - name: Collect temperatures with nothing installed
+        run: |
+          SYSFS_ROOT=tests/fixtures/sysfs-typical bash -c '
+            source lib/sensors.sh
+            source lib/discovery.sh
+            NODE_ID=ci NODE_NAME=ci DISCOVERY_PREFIX=homeassistant
+            STATE_TOPIC=nodemon/ci/state INTERVAL=60 AGENT_VERSION=test
+            records=$(sensors_collect_temperatures)
+            [ -n "$records" ] || { echo "no sensors collected"; exit 1; }
+            printf "%s\n" "$records" | discovery_state_payload
+          '
+
+      - name: Build MQTT packets with nothing installed
+        run: |
+          bash -c '
+            source lib/mqtt.sh
+            frame=$(mqtt_build_publish "a/b" "hi" 1)
+            printf "%b" "$frame" | od -An -tx1
+          '
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the broker
+        # Real eclipse-mosquitto, pinned. The client under test is ours; the
+        # broker and the verifying subscriber deliberately are not, so these
+        # tests prove interoperability rather than self-consistency.
+        run: ./scripts/dev-broker.sh up
+
+      - name: Run integration tests
+        run: ./tests/run.sh integration
+
+      - name: Broker logs on failure
+        if: failure()
+        run: ./scripts/dev-broker.sh logs
+        continue-on-error: true
+
+      - name: Stop the broker
+        if: always()
+        run: ./scripts/dev-broker.sh down

@@ -211,6 +211,47 @@ test_discovery_is_not_republished_when_sensor_set_is_unchanged() {
         "second identical run should skip discovery" || return 1
 }
 
+test_concurrent_runs_do_not_disconnect_each_other() {
+    # MQTT brokers disconnect an existing client when a new one connects with
+    # the same client ID. A manual `systemctl start` overlapping a timer firing
+    # would then kick the other off mid-publish and lose its readings, while
+    # both runs still reported success -- a QoS 0 publish into a socket the
+    # broker has already closed raises no error locally.
+    setup_env
+
+    local out_a out_b
+    run_agent sysfs-typical >/dev/null 2>&1
+
+    # Two runs overlapping in time.
+    out_a=$(run_agent sysfs-typical) &
+    local pid_a=$!
+    out_b=$(run_agent sysfs-typical)
+    wait $pid_a
+
+    # Both must still land a state message. Subscribe first, then run again
+    # concurrently and count what actually arrives.
+    docker run --rm -d --name "hnm-conc-$$" --network host "$MOSQ_IMAGE" \
+        mosquitto_sub -h "$BROKER_HOST" -p "$BROKER_PORT" -t "nodemon/${TEST_NODE}/state" -F '%p' >/dev/null
+    sleep 1
+
+    run_agent sysfs-typical >/dev/null 2>&1 &
+    run_agent sysfs-typical >/dev/null 2>&1
+    wait
+    sleep 1
+
+    local received
+    received=$(docker logs "hnm-conc-$$" 2>/dev/null | grep -c . || true)
+    docker rm -f "hnm-conc-$$" >/dev/null 2>&1
+
+    cleanup_node
+    teardown_env
+
+    if ((received < 2)); then
+        _fail "both concurrent runs should publish; only ${received} state message(s) arrived"
+        return 1
+    fi
+}
+
 test_agent_reports_a_readable_error_when_broker_is_unreachable() {
     setup_env
     sed -i 's/^MQTT_PORT=.*/MQTT_PORT=1/' "$TEST_CONFIG"
