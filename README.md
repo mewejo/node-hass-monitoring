@@ -156,9 +156,16 @@ CI additionally runs the unit suite on Debian, Ubuntu and Arch containers, and
 asserts the zero-dependency claim by collecting sensors and building MQTT
 packets on an image with no MQTT client, no Python and no curl.
 
-**Not covered by CI:** systemd behaviour — that the timer fires on schedule and
-that the service's sandboxing doesn't block the agent. That needs a real init
-system as PID 1, so it is verified by installing on an actual node.
+Systemd is covered end to end on a runner VM, which has real systemd as PID 1:
+the installer runs for real as root, and the job then waits for the timer to
+fire on its own and checks that the service runs as the unprivileged user, that
+readings keep arriving, that the state directory is writable under
+`ProtectSystem=strict`, and that uninstall clears both the units and the
+retained entities.
+
+That last point is the one worth having: the service sets `ProtectHome=true`, so
+it genuinely cannot read `/home`. Sandboxing like that looks harmless right up
+until it silently breaks the thing it protects.
 
 ## Adding other metrics
 
