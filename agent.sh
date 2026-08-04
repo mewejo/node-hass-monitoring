@@ -82,10 +82,25 @@ read_published_entities() {
 }
 
 write_published_entities() {
-    # Best-effort: a node that cannot write state still publishes fine, it just
-    # cannot clean up later. Better than refusing to report temperatures.
-    mkdir -p "$STATE_DIR" 2>/dev/null || return 0
-    printf '%s\n' "$@" >"$PUBLISHED_ENTITIES_FILE" 2>/dev/null || true
+    # Best-effort: a node that cannot write state still publishes temperatures
+    # fine, it just cannot clean up entities later. Refusing to report at all
+    # would be the worse trade.
+    #
+    # But the failure is reported rather than swallowed. A silent failure here
+    # means stale-entity cleanup quietly stops working and nothing ever says
+    # so -- which is exactly what happened when the installer's first run, as
+    # root, left this file root-owned under a directory owned by the service
+    # user.
+    if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+        log "warning: cannot create ${STATE_DIR}; stale entities will not be cleaned up"
+        return 0
+    fi
+
+    if ! printf '%s\n' "$@" >"$PUBLISHED_ENTITIES_FILE" 2>/dev/null; then
+        log "warning: cannot write ${PUBLISHED_ENTITIES_FILE} (owned by another user?);"
+        log "         stale entities will not be cleaned up"
+    fi
+    return 0
 }
 
 # --------------------------------------------------------------------------

@@ -426,6 +426,11 @@ MQTT_TLS=$(printf '%q' "$MQTT_TLS")
 DISCOVERY_PREFIX=$(printf '%q' "$DISCOVERY_PREFIX")
 INTERVAL=$(printf '%q' "$INTERVAL")
 
+# Persisted so re-running the installer to pick up an update keeps the
+# account you chose. Without this, a deliberate root install silently reverts
+# to the unprivileged user on the next run.
+RUN_AS_USER=$(printf '%q' "$RUN_AS_USER")
+
 # Sensors whose chip name matches this regex are not reported. Use it to prune
 # noisy chips, for example AUXTIN pins with nothing connected to them:
 #   IGNORE_PATTERN='hidpp_battery|_battery\$|^BAT[0-9]|AUXTIN'
@@ -500,6 +505,15 @@ first_run() {
         LIB_DIR="${DESTDIR}${INSTALL_DIR}/lib" \
         "${DESTDIR}${INSTALL_DIR}/agent.sh" 2>&1)
     status=$?
+
+    # This ran as root, so anything it created under the state directory is
+    # root-owned. The service runs as an unprivileged user inside a directory
+    # it owns, but it cannot rewrite a root-owned file within it -- and the
+    # agent treats that write as best-effort, so the failure would be silent
+    # and stale-entity cleanup would simply stop working forever.
+    if [[ $RUN_AS_USER != root && $SKIP_SYSTEMD != 1 ]] && id "$RUN_AS_USER" >/dev/null 2>&1; then
+        chown -R "${RUN_AS_USER}:${RUN_AS_USER}" "${DESTDIR}${STATE_DIR}"
+    fi
 
     if ((status == 0)); then
         ok "${output}"

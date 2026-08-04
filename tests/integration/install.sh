@@ -175,6 +175,123 @@ test_installer_is_idempotent() {
     assert_eq "$first_listing" "$second_listing" "re-running must not change the file layout" || return 1
 }
 
+test_rerunning_leaves_config_byte_identical() {
+    # The previous idempotency test only compared the file *listing*, which
+    # would pass even if every setting inside had been rewritten or reordered.
+    local dest first second
+    dest=$(mktemp -d)
+
+    run_installer "$dest" >/dev/null
+    first=$(cat "${dest}/etc/hass-node-monitor/config.env")
+    run_installer "$dest" >/dev/null
+    second=$(cat "${dest}/etc/hass-node-monitor/config.env")
+
+    rm -rf "$dest"
+    assert_eq "$first" "$second" "re-running must not rewrite config contents" || return 1
+}
+
+test_rerunning_preserves_file_permissions() {
+    local dest first second
+    dest=$(mktemp -d)
+
+    run_installer "$dest" >/dev/null
+    first=$(find "$dest" -type f -printf '%m %P\n' | sort)
+    run_installer "$dest" >/dev/null
+    second=$(find "$dest" -type f -printf '%m %P\n' | sort)
+
+    rm -rf "$dest"
+    assert_eq "$first" "$second" "re-running must not change file modes" || return 1
+}
+
+test_rerunning_preserves_the_service_account_choice() {
+    # Someone who deliberately installs as root, then re-runs the one-liner to
+    # pick up an update, must not silently have their service moved to a
+    # different account. Re-running is the documented way to push updates to a
+    # fleet, so a hidden change of identity there is a nasty surprise.
+    local dest configured
+    dest=$(mktemp -d)
+
+    RUN_AS_USER=root run_installer "$dest" >/dev/null
+    run_installer "$dest" >/dev/null
+
+    configured=$(grep '^RUN_AS_USER=' "${dest}/etc/hass-node-monitor/config.env" 2>/dev/null || true)
+
+    rm -rf "$dest"
+    assert_contains "$configured" "root" "the chosen service account must survive a re-run" || return 1
+}
+
+test_rerunning_does_not_change_installed_code() {
+    local dest first second
+    dest=$(mktemp -d)
+
+    run_installer "$dest" >/dev/null
+    first=$(find "${dest}/usr" -type f -exec md5sum {} \; | sed "s|$dest||" | sort)
+    run_installer "$dest" >/dev/null
+    second=$(find "${dest}/usr" -type f -exec md5sum {} \; | sed "s|$dest||" | sort)
+
+    rm -rf "$dest"
+    assert_eq "$first" "$second" "installed code should be identical after a re-run" || return 1
+}
+
+test_install_after_uninstall_works() {
+    # Uninstall removes the state directory, so a later install must not
+    # depend on anything it left behind.
+    local dest status
+    dest=$(mktemp -d)
+
+    run_installer "$dest" >/dev/null
+    DESTDIR="$dest" SKIP_SYSTEMD=1 bash "${REPO_ROOT}/install.sh" --uninstall >/dev/null 2>&1
+
+    run_installer "$dest" >/dev/null
+    status=$?
+
+    local has_config=0
+    [[ -e "${dest}/etc/hass-node-monitor/config.env" ]] && has_config=1
+    rm -rf "$dest"
+
+    assert_eq "0" "$status" "installing after an uninstall should succeed" || return 1
+    assert_eq "1" "$has_config" "config should be recreated" || return 1
+}
+
+test_rerunning_does_not_duplicate_entities_in_home_assistant() {
+    # Discovery configs are retained and keyed by topic, so duplicates would
+    # show up as extra retained topics rather than as errors.
+    local dest node before after
+    dest=$(mktemp -d)
+    node="idem$$${RANDOM}"
+
+    local agent_env=(
+        CONFIG_FILE="${dest}/etc/hass-node-monitor/config.env"
+        STATE_DIR="${dest}/var/lib/hass-node-monitor"
+        LIB_DIR="${dest}/usr/local/lib/hass-node-monitor/lib"
+        NODE_NAME="$node"
+        SYSFS_ROOT="${REPO_ROOT}/tests/fixtures/sysfs-typical"
+    )
+
+    run_installer "$dest" >/dev/null
+    env "${agent_env[@]}" "${dest}/usr/local/lib/hass-node-monitor/agent.sh" >/dev/null 2>&1
+    before=$(count_retained_configs "$node")
+
+    run_installer "$dest" >/dev/null
+    env "${agent_env[@]}" "${dest}/usr/local/lib/hass-node-monitor/agent.sh" >/dev/null 2>&1
+    after=$(count_retained_configs "$node")
+
+    env "${agent_env[@]}" "${dest}/usr/local/lib/hass-node-monitor/agent.sh" --clear >/dev/null 2>&1
+    rm -rf "$dest"
+
+    if ((before < 15)); then
+        _fail "setup failed: expected entities after first install, saw ${before}"
+        return 1
+    fi
+    assert_eq "$before" "$after" "re-running must not create duplicate entities" || return 1
+}
+
+count_retained_configs() {
+    docker run --rm --network host eclipse-mosquitto:2.0.22 \
+        mosquitto_sub -h "$BROKER_HOST" -p "$BROKER_PORT" \
+        -t "homeassistant/sensor/nodemon_$1/+/config" -F '%t' -W 2 2>/dev/null | grep -c . || true
+}
+
 test_uninstall_removes_everything() {
     local dest
     dest=$(mktemp -d)

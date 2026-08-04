@@ -236,6 +236,52 @@ jobs:
           sudo test -s /var/lib/hass-node-monitor/published-entities
           echo "entities recorded: $(sudo wc -l < /var/lib/hass-node-monitor/published-entities)"
 
+      - name: Service user can actually rewrite its own state
+        # The installer's first publish runs as root, so without an explicit
+        # chown afterwards this file ends up root-owned inside a directory the
+        # service user owns. The service can then never update it, the agent
+        # treats that write as best-effort, and stale-entity cleanup silently
+        # stops working for good.
+        run: |
+          ls -l /var/lib/hass-node-monitor/published-entities
+          owner=$(stat -c '%U' /var/lib/hass-node-monitor/published-entities)
+          echo "state file owner: ${owner}"
+          [ "$owner" = "hass-node-monitor" ] || {
+            echo "::error::state file is owned by ${owner}, not the service user"
+            exit 1
+          }
+          sudo -u hass-node-monitor test -w /var/lib/hass-node-monitor/published-entities || {
+            echo "::error::service user cannot write its own state file"
+            exit 1
+          }
+
+      - name: Re-running the installer keeps the service account
+        # Re-running the one-liner is the documented way to push updates to a
+        # fleet, so it must not silently move the service to a different
+        # account or leave state the service can no longer write.
+        run: |
+          before=$(systemctl show -p User --value hass-node-monitor.service)
+          sudo INTERVAL=10 bash install.sh --non-interactive >/dev/null
+          after=$(systemctl show -p User --value hass-node-monitor.service)
+
+          echo "service user before=${before} after=${after}"
+          [ "$before" = "$after" ] || {
+            echo "::error::re-running changed the service account"
+            exit 1
+          }
+
+          owner=$(stat -c '%U' /var/lib/hass-node-monitor/published-entities)
+          [ "$owner" = "hass-node-monitor" ] || {
+            echo "::error::re-running left state owned by ${owner}"
+            exit 1
+          }
+
+          systemctl is-enabled --quiet hass-node-monitor.timer || {
+            echo "::error::timer is no longer enabled after a re-run"
+            exit 1
+          }
+          echo "re-run is clean"
+
       - name: Uninstall removes units, files and HA entities
         run: |
           sudo bash install.sh --uninstall
