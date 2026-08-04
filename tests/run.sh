@@ -16,6 +16,12 @@ PASS=0
 FAIL=0
 FAILED_TESTS=()
 
+# The fake /sys trees are generated, not committed. Build them if missing so a
+# fresh clone can run the suite with no setup step.
+if [[ ! -d "${REPO_ROOT}/tests/fixtures/sysfs-typical" ]]; then
+    "${REPO_ROOT}/tests/fixtures/make-fixtures.sh" >/dev/null
+fi
+
 run_file() {
     local file=$1
     printf '\n\033[1m%s\033[0m\n' "${file#"$REPO_ROOT"/}"

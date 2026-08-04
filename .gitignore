@@ -8,3 +8,9 @@ tests/broker/passwd
 # node at install time and must never reach the repo.
 *.env
 config.env
+
+# Fake /sys trees, built by tests/fixtures/make-fixtures.sh. Generated rather
+# than committed: they are ~130 tiny files that would swamp every diff, and they
+# rely on symlinks that git does not round-trip faithfully everywhere. The
+# generator is the source of truth and the test runner builds them on demand.
+tests/fixtures/sysfs-*/
