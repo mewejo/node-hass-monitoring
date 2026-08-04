@@ -1,0 +1,10 @@
+# Locally generated test broker material. Never commit these: this is a public
+# repo, and committing private keys is a bad habit even when the key is a
+# throwaway for a container that guards nothing.
+tests/broker/certs/
+tests/broker/passwd
+
+# Runtime configuration holds the MQTT password. It is written on the monitored
+# node at install time and must never reach the repo.
+*.env
+config.env
