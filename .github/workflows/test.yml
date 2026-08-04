@@ -115,6 +115,12 @@ jobs:
           # Remove the obvious candidates so a hidden dependency cannot hide.
           apt-get remove -y -qq curl 2>/dev/null || true
 
+      - name: Build sysfs fixtures
+        # The fake /sys trees are generated rather than committed, and this job
+        # reads them directly instead of going through tests/run.sh, which
+        # builds them on demand.
+        run: ./tests/fixtures/make-fixtures.sh
+
       - name: Collect temperatures with nothing installed
         run: |
           SYSFS_ROOT=tests/fixtures/sysfs-typical bash -c '

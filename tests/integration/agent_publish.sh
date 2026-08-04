@@ -219,17 +219,10 @@ test_concurrent_runs_do_not_disconnect_each_other() {
     # broker has already closed raises no error locally.
     setup_env
 
-    local out_a out_b
     run_agent sysfs-typical >/dev/null 2>&1
 
-    # Two runs overlapping in time.
-    out_a=$(run_agent sysfs-typical) &
-    local pid_a=$!
-    out_b=$(run_agent sysfs-typical)
-    wait $pid_a
-
-    # Both must still land a state message. Subscribe first, then run again
-    # concurrently and count what actually arrives.
+    # Subscribe first, because state messages are not retained, then run two
+    # agents overlapping in time and count how many readings actually arrive.
     docker run --rm -d --name "hnm-conc-$$" --network host "$MOSQ_IMAGE" \
         mosquitto_sub -h "$BROKER_HOST" -p "$BROKER_PORT" -t "nodemon/${TEST_NODE}/state" -F '%p' >/dev/null
     sleep 1

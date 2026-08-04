@@ -84,8 +84,8 @@ cmd_up() {
 
     # Wait for readiness rather than sleeping a fixed amount: a fixed sleep is
     # either slow or flaky, and on CI it is usually both.
-    local i
-    for i in $(seq 1 50); do
+    local _attempt
+    for _attempt in $(seq 1 50); do
         if (exec 3<>/dev/tcp/127.0.0.1/1883) 2>/dev/null; then
             echo "==> broker ready"
             return 0

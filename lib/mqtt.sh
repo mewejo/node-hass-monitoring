@@ -200,7 +200,9 @@ mqtt_connect() {
         }
     fi
 
-    if ! printf '%b' "$(mqtt_build_connect "$client_id" "$username" "$password")" >&"$MQTT_FD_OUT" 2>/dev/null; then
+    # Grouped so the stderr redirection applies to the group rather than
+    # competing with the fd duplication on the same command.
+    if ! { printf '%b' "$(mqtt_build_connect "$client_id" "$username" "$password")" >&"$MQTT_FD_OUT"; } 2>/dev/null; then
         mqtt_last_error="failed to send CONNECT to ${host}:${port}"
         mqtt_close
         return 1
@@ -256,7 +258,7 @@ mqtt_publish() {
 # closing the socket the instant after writing can drop messages the broker has
 # not yet read. DISCONNECT plus a moment's grace lets the buffer drain.
 mqtt_disconnect() {
-    printf '%b' "$(mqtt_build_disconnect)" >&"$MQTT_FD_OUT" 2>/dev/null || true
+    { printf '%b' "$(mqtt_build_disconnect)" >&"$MQTT_FD_OUT"; } 2>/dev/null || true
     sleep 0.1
     mqtt_close
 }
