@@ -1,0 +1,20 @@
+[Unit]
+Description=Report node temperatures to Home Assistant every __INTERVAL__ seconds
+Documentation=https://github.com/mewejo/node-hass-monitoring
+
+[Timer]
+# Start reporting shortly after boot rather than waiting a full interval, so a
+# rebooted node reappears in Home Assistant promptly.
+OnBootSec=30
+OnUnitActiveSec=__INTERVAL__
+
+# The default accuracy is a whole minute, which systemd is free to use to batch
+# timers together. On a 60 second interval that produces visibly irregular
+# reporting and can trip expire_after.
+AccuracySec=1s
+
+# Deliberately NOT Persistent=true: a missed run is a stale temperature, and
+# replaying it on boot would publish a reading from before the downtime.
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,48 @@
+[Unit]
+Description=Report node temperatures to Home Assistant over MQTT
+Documentation=https://github.com/mewejo/node-hass-monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__RUN_AS_USER__
+Group=__RUN_AS_USER__
+ExecStart=/usr/local/lib/hass-node-monitor/agent.sh
+
+# A publish cycle is a few hundred milliseconds. If it has not finished in a
+# minute something is wrong, and hanging forever would mean the timer never
+# fires again.
+TimeoutStartSec=60
+
+# Reading temperatures needs no privileges: everything under /sys/class/hwmon is
+# world-readable. The service therefore runs as an unprivileged system user with
+# the kernel's own sandboxing on top, so a bug here cannot reach the rest of the
+# machine.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+# Only outbound network access to the broker is needed.
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# ProtectSystem=strict makes everything read-only; this is the one path the
+# agent writes to, recording which entities it has published so it can clean up
+# after hardware changes.
+ReadWritePaths=/var/lib/hass-node-monitor
+
+[Install]
+WantedBy=multi-user.target
