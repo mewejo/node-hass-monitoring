@@ -141,6 +141,125 @@ jobs:
             printf "%b" "$frame" | od -An -tx1
           '
 
+  # The GitHub runner is a throwaway VM with real systemd as PID 1, so the
+  # timer and the service sandboxing can be tested properly rather than by
+  # hand on a real node. This installs for real, as root, and waits for the
+  # timer to fire on its own.
+  systemd:
+    name: systemd end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the broker
+        run: ./scripts/dev-broker.sh up
+
+      - name: Build sysfs fixtures outside /home
+        # A CI runner is a VM and usually exposes no temperature sensors at
+        # all, so the agent needs fixtures to have anything to report.
+        #
+        # They must live outside /home because the service sets
+        # ProtectHome=true and genuinely cannot read there -- which is itself
+        # worth proving, since it is the kind of hardening that looks harmless
+        # until it silently breaks the thing it protects.
+        run: |
+          ./tests/fixtures/make-fixtures.sh
+          sudo mkdir -p /opt/hnm-fixtures
+          sudo cp -r tests/fixtures/sysfs-typical /opt/hnm-fixtures/
+
+      - name: Install for real
+        run: |
+          sudo MQTT_HOST=127.0.0.1 MQTT_PORT=1883 INTERVAL=10 \
+            bash install.sh --non-interactive
+
+      - name: Point the agent at the fixture tree
+        # config.env is sourced before the collector runs, so this reaches
+        # sensors.sh the same way any other setting does.
+        run: |
+          echo 'SYSFS_ROOT=/opt/hnm-fixtures/sysfs-typical' | sudo tee -a /etc/hass-node-monitor/config.env
+          sudo systemctl restart hass-node-monitor.timer
+
+      - name: Service runs under its sandbox without failing
+        run: |
+          sudo systemctl start hass-node-monitor.service
+          sudo systemctl status hass-node-monitor.service --no-pager || true
+          # A oneshot that exited non-zero shows as failed.
+          if systemctl is-failed --quiet hass-node-monitor.service; then
+            echo "::error::service failed under its systemd sandbox"
+            sudo journalctl -u hass-node-monitor.service -n 50 --no-pager
+            exit 1
+          fi
+
+      - name: Confirm it runs unprivileged
+        run: |
+          user=$(systemctl show -p User --value hass-node-monitor.service)
+          echo "service user: ${user:-root}"
+          [ "$user" = "hass-node-monitor" ] || { echo "::error::expected unprivileged user"; exit 1; }
+          id hass-node-monitor
+
+      - name: Timer fires on its own
+        run: |
+          systemctl list-timers hass-node-monitor.timer --no-pager
+
+          before=$(systemctl show -p NRestarts,ExecMainStartTimestampMonotonic \
+            --value hass-node-monitor.service | head -1)
+
+          # Subscribe, then wait long enough for two 10 second firings.
+          docker run --rm -d --name hnm-timer --network host eclipse-mosquitto:2.0.22 \
+            mosquitto_sub -h 127.0.0.1 -p 1883 -t 'nodemon/+/state' -F '%p' >/dev/null
+          sleep 25
+
+          received=$(docker logs hnm-timer 2>/dev/null | grep -c . || true)
+          docker rm -f hnm-timer >/dev/null
+
+          echo "state messages received in 25s: ${received}"
+          if [ "${received:-0}" -lt 2 ]; then
+            echo "::error::timer did not fire repeatedly (expected at least 2 in 25s)"
+            sudo journalctl -u hass-node-monitor.service -n 50 --no-pager
+            exit 1
+          fi
+
+      - name: Device is discoverable in Home Assistant
+        run: |
+          node=$(uname -n | cut -d. -f1 | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_')
+          count=$(docker run --rm --network host eclipse-mosquitto:2.0.22 \
+            mosquitto_sub -h 127.0.0.1 -p 1883 -t 'homeassistant/sensor/+/+/config' -F '%t' -W 3 2>/dev/null \
+            | grep -c . || true)
+          echo "retained discovery configs: ${count}"
+          [ "${count:-0}" -ge 15 ] || { echo "::error::expected a discovery config per sensor"; exit 1; }
+
+      - name: State survives a reboot of the unit
+        # Proves the state directory is writable under ProtectSystem=strict;
+        # without the ReadWritePaths exception the agent cannot record what it
+        # published and stale-entity cleanup silently stops working.
+        run: |
+          sudo test -s /var/lib/hass-node-monitor/published-entities
+          echo "entities recorded: $(sudo wc -l < /var/lib/hass-node-monitor/published-entities)"
+
+      - name: Uninstall removes units, files and HA entities
+        run: |
+          sudo bash install.sh --uninstall
+
+          systemctl list-unit-files | grep hass-node-monitor && \
+            { echo "::error::units still present"; exit 1; } || true
+          test ! -e /etc/hass-node-monitor || { echo "::error::config left behind"; exit 1; }
+          test ! -e /usr/local/lib/hass-node-monitor || { echo "::error::agent left behind"; exit 1; }
+
+          remaining=$(docker run --rm --network host eclipse-mosquitto:2.0.22 \
+            mosquitto_sub -h 127.0.0.1 -p 1883 -t 'homeassistant/sensor/+/+/config' -F '%t' -W 3 2>/dev/null \
+            | grep -c . || true)
+          echo "discovery configs remaining: ${remaining}"
+          [ "${remaining:-0}" -eq 0 ] || { echo "::error::entities left in Home Assistant"; exit 1; }
+
+      - name: Journal on failure
+        if: failure()
+        run: sudo journalctl -u hass-node-monitor.service -n 100 --no-pager
+        continue-on-error: true
+
+      - name: Stop the broker
+        if: always()
+        run: ./scripts/dev-broker.sh down
+
   integration:
     name: integration
     runs-on: ubuntu-latest
