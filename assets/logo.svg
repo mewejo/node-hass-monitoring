@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="node-hass-monitoring">
+  <title>node-hass-monitoring</title>
+
+  <defs>
+    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Badge. A self-contained background so the mark stays legible on both
+       light and dark README themes. -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#badge)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="1.5"/>
+
+  <!-- Thermometer: the temperature being measured. -->
+  <rect x="30" y="24" width="16" height="62" rx="8" fill="#FFFFFF"/>
+  <circle cx="38" cy="94" r="15" fill="#FFFFFF"/>
+  <rect x="34" y="44" width="8" height="46" rx="4" fill="#FBBF24"/>
+  <circle cx="38" cy="94" r="9" fill="#FBBF24"/>
+
+  <!-- Broadcast arcs: the reading being published to Home Assistant. -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round">
+    <path d="M78.70 72.34 A13 13 0 0 1 78.70 91.66"/>
+    <path d="M85.05 65.28 A22.5 22.5 0 0 1 85.05 98.72" stroke-opacity="0.75"/>
+    <path d="M91.41 58.22 A32 32 0 0 1 91.41 105.78" stroke-opacity="0.5"/>
+  </g>
+</svg>
