@@ -154,6 +154,10 @@ cmd_clear() {
         ((cleared++))
     done
 
+    # The state topic is retained too, so it needs clearing as well. Leaving it
+    # behind would resurrect readings for a node that no longer exists.
+    mqtt_publish "$STATE_TOPIC" "" 1
+
     mqtt_disconnect
     rm -f "$PUBLISHED_ENTITIES_FILE" 2>/dev/null || true
     log "cleared ${cleared} entities from Home Assistant"
@@ -235,7 +239,18 @@ cmd_publish() {
         log "removed stale entity: ${stale_key}"
     done
 
-    mqtt_publish "$STATE_TOPIC" "$state_payload"
+    # Retained, and that matters more than it looks. Home Assistant subscribes
+    # to this topic only after it has received and processed the retained
+    # discovery config, so a non-retained state published moments earlier is
+    # already gone by the time HA is listening. The entity then sits empty until
+    # the next timer firing -- up to a whole interval later, which reads as "the
+    # install did nothing".
+    #
+    # It also means entities repopulate immediately after a Home Assistant
+    # restart instead of waiting for the next cycle. A retained value can be
+    # stale if a node dies, but expire_after already covers that by marking the
+    # sensor unavailable.
+    mqtt_publish "$STATE_TOPIC" "$state_payload" 1
     mqtt_disconnect
 
     write_published_entities "${current_keys[@]}"

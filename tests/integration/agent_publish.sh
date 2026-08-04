@@ -51,6 +51,12 @@ sub_retained() {
         -t "$1" -F '%p' -W "${2:-2}" 2>/dev/null
 }
 
+sub_retained_with_flag() {
+    docker run --rm --network host "$MOSQ_IMAGE" \
+        mosquitto_sub -h "$BROKER_HOST" -p "$BROKER_PORT" \
+        -t "$1" -F 'retain=%r %p' -W "${2:-2}" 2>/dev/null
+}
+
 count_retained() {
     docker run --rm --network host "$MOSQ_IMAGE" \
         mosquitto_sub -h "$BROKER_HOST" -p "$BROKER_PORT" \
@@ -62,6 +68,60 @@ cleanup_node() {
 }
 
 # --------------------------------------------------------------------------
+
+test_state_is_available_to_a_subscriber_that_arrives_later() {
+    # Home Assistant subscribes to the state topic only *after* it has received
+    # and processed the retained discovery config. A non-retained state message
+    # published moments earlier is therefore already gone by the time HA is
+    # listening, and the entity sits at "unknown" until the next timer firing --
+    # up to a full interval later, which reads as "the install did nothing".
+    #
+    # Retaining the state fixes both that and the same gap after an HA restart.
+    setup_env
+    run_agent sysfs-typical >/dev/null || {
+        teardown_env
+        _fail "agent run failed"
+        return 1
+    }
+
+    local state
+    state=$(sub_retained "nodemon/${TEST_NODE}/state")
+
+    cleanup_node
+    teardown_env
+
+    if [[ -z $state ]]; then
+        _fail "no state available to a later subscriber; entities would stay empty until the next cycle"
+        return 1
+    fi
+    assert_eq "70.1" "$(json_get "$state" 'k10temp_0000_00_18_3_temp1')" || return 1
+}
+
+test_state_message_carries_the_retain_flag() {
+    setup_env
+    run_agent sysfs-typical >/dev/null
+
+    local flagged
+    flagged=$(sub_retained_with_flag "nodemon/${TEST_NODE}/state")
+
+    cleanup_node
+    teardown_env
+    assert_contains "$flagged" "retain=1" "state must be retained" || return 1
+}
+
+test_clear_also_removes_the_retained_state() {
+    # A retained state left behind after uninstall would resurrect readings for
+    # a node that no longer exists if it were ever rediscovered.
+    setup_env
+    run_agent sysfs-typical >/dev/null
+    run_agent sysfs-typical --clear >/dev/null
+
+    local leftover
+    leftover=$(sub_retained "nodemon/${TEST_NODE}/state")
+
+    teardown_env
+    assert_eq "" "$leftover" "--clear must also clear the retained state topic" || return 1
+}
 
 test_agent_publishes_state_to_broker() {
     setup_env
