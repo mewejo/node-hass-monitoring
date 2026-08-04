@@ -21,6 +21,45 @@ one sensor per temperature the kernel exposes.
 To update every node later, run the same command again: it refreshes the code
 and leaves your settings alone.
 
+### Rolling out to several nodes
+
+Across a fleet the broker and username are the same everywhere and only the
+password is worth typing, so those can be preset:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mewejo/node-hass-monitoring/master/install.sh \
+  | sudo bash -s -- --host hass.example.com --user node-health --yes
+```
+
+That asks for the password and nothing else. Anything given on the command line
+is never prompted for, and `--yes` accepts defaults for the rest.
+
+Fully unattended, keeping the password out of `ps` and your shell history:
+
+```sh
+printf '%s' "$MQTT_PASS" | curl -fsSL .../install.sh \
+  | sudo bash -s -- --host hass.example.com --user node-health --password-stdin --yes
+```
+
+| Preset | Meaning |
+| --- | --- |
+| `--host` / `--port` | broker address |
+| `--user` / `--password` | broker credentials (prefer `--password-stdin`) |
+| `--tls` / `--no-tls` | connect over TLS |
+| `--prefix` | Home Assistant discovery prefix |
+| `--interval` | seconds between reports |
+| `--run-as` | service account, or `root` |
+| `--ignore-pattern` | regex of sensor chips to skip |
+
+Presets override what is already stored, so a wrong broker can be corrected
+across every node with one re-run, without touching anything else:
+
+```sh
+curl -fsSL .../install.sh | sudo bash -s -- --host newhost.example.com
+```
+
+Run `install.sh --help` for the full list.
+
 ## Why it has no dependencies
 
 Nodes run whatever they run — Proxmox, Debian, Ubuntu, Arch — and the usual

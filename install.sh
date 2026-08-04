@@ -14,9 +14,12 @@
 #
 # Re-running is safe: it updates the code and leaves your settings alone.
 #
-#   --reconfigure       re-prompt for connection details
-#   --uninstall         remove everything, including entities in Home Assistant
-#   --non-interactive   take settings from environment variables instead
+# Settings can be preset on the command line, so rolling out to a fleet asks
+# only for the password:
+#
+#   curl … | sudo bash -s -- --host hass.example.com --user node-health --yes
+#
+# Run with --help for the full list of options.
 set -uo pipefail
 
 REPO="${REPO:-mewejo/node-hass-monitoring}"
@@ -200,38 +203,90 @@ load_existing_config() {
     return 0
 }
 
+# True when a setting was supplied on the command line, in which case it is
+# used as given and never prompted for.
+was_preset() {
+    [[ " ${PRESET_KEYS[*]-} " == *" $1 "* ]]
+}
+
+# Prompt unless the setting was preset, or --yes said to take the default.
+maybe_prompt() {
+    local key=$1 varname=$2 label=$3 default=$4 secret=${5:-0}
+
+    if was_preset "$key"; then
+        return 0
+    fi
+
+    if ((ASSUME_YES)); then
+        printf -v "$varname" '%s' "$default"
+        return 0
+    fi
+
+    prompt "$varname" "$label" "$default" "$secret"
+}
+
 gather_config() {
-    step "MQTT connection details"
-    say "  ${C_DIM}These are your MQTT broker's details, not Home Assistant's web UI.${C_OFF}"
-    say "  ${C_DIM}If you use the Mosquitto add-on, the host is your Home Assistant machine.${C_OFF}"
-    say ""
-
-    prompt MQTT_HOST "MQTT broker host" "${MQTT_HOST:-}"
-    [[ -n $MQTT_HOST ]] || die "a broker host is required"
-
-    prompt MQTT_PORT "MQTT broker port" "${MQTT_PORT:-1883}"
-    prompt MQTT_USERNAME "MQTT username (blank for anonymous)" "${MQTT_USERNAME:-}"
-
-    if [[ -n $MQTT_USERNAME ]]; then
-        # Offer to keep the stored password rather than making the user retype
-        # it on every reconfigure.
-        if [[ -n ${MQTT_PASSWORD:-} ]]; then
-            local keep
-            prompt_yes_no keep "Keep the existing password" "y"
-            ((keep)) || prompt MQTT_PASSWORD "MQTT password" "" 1
-        else
-            prompt MQTT_PASSWORD "MQTT password" "" 1
-        fi
+    # With everything preset there is nothing to ask, so skip the banner too.
+    if ((ASSUME_YES)) && was_preset host; then
+        : "${MQTT_PORT:=1883}"
+        : "${DISCOVERY_PREFIX:=homeassistant}"
+        : "${INTERVAL:=60}"
+        : "${RUN_AS_USER:=$DEFAULT_USER}"
+        : "${MQTT_TLS:=0}"
     else
+        step "MQTT connection details"
+        say "  ${C_DIM}These are your MQTT broker's details, not Home Assistant's web UI.${C_OFF}"
+        say "  ${C_DIM}If you use the Mosquitto add-on, the host is your Home Assistant machine.${C_OFF}"
+        say ""
+    fi
+
+    maybe_prompt host MQTT_HOST "MQTT broker host" "${MQTT_HOST:-}"
+    [[ -n $MQTT_HOST ]] || die "a broker host is required (pass --host)"
+
+    maybe_prompt port MQTT_PORT "MQTT broker port" "${MQTT_PORT:-1883}"
+    maybe_prompt user MQTT_USERNAME "MQTT username (blank for anonymous)" "${MQTT_USERNAME:-}"
+
+    # The password is the one thing genuinely per-node worth typing, so it is
+    # still asked for even under --yes -- unless it was preset, or there is no
+    # username, or one is already stored.
+    if [[ -n $MQTT_USERNAME ]]; then
+        if was_preset password; then
+            :
+        elif [[ -n ${MQTT_PASSWORD:-} ]]; then
+            if ((ASSUME_YES)); then
+                : # keep the stored password
+            else
+                local keep
+                prompt_yes_no keep "Keep the existing password" "y"
+                ((keep)) || prompt MQTT_PASSWORD "MQTT password" "" 1
+            fi
+        elif ((TTY_AVAILABLE)); then
+            prompt MQTT_PASSWORD "MQTT password for ${MQTT_USERNAME}" "" 1
+        else
+            die "a password is required for user '${MQTT_USERNAME}' (pass --password-stdin)"
+        fi
+    elif ! was_preset password; then
         MQTT_PASSWORD=""
     fi
 
-    prompt_yes_no MQTT_TLS "Use TLS" "${MQTT_TLS:-0}"
-    prompt DISCOVERY_PREFIX "Home Assistant discovery prefix" "${DISCOVERY_PREFIX:-homeassistant}"
-    prompt INTERVAL "Reporting interval in seconds" "${INTERVAL:-60}"
+    if ! was_preset tls; then
+        if ((ASSUME_YES)); then
+            MQTT_TLS="${MQTT_TLS:-0}"
+        else
+            prompt_yes_no MQTT_TLS "Use TLS" "${MQTT_TLS:-0}"
+        fi
+    fi
+
+    maybe_prompt prefix DISCOVERY_PREFIX "Home Assistant discovery prefix" "${DISCOVERY_PREFIX:-homeassistant}"
+    maybe_prompt interval INTERVAL "Reporting interval in seconds" "${INTERVAL:-60}"
 
     [[ $INTERVAL =~ ^[0-9]+$ ]] || die "interval must be a whole number of seconds"
     ((INTERVAL >= 10)) || die "interval must be at least 10 seconds"
+
+    if was_preset run_as || ((ASSUME_YES)); then
+        RUN_AS_USER="${RUN_AS_USER:-$DEFAULT_USER}"
+        return 0
+    fi
 
     say ""
     step "Service account"
@@ -240,11 +295,13 @@ gather_config() {
     say ""
 
     local as_root
-    prompt_yes_no as_root "Run as root instead of an unprivileged user" "n"
+    prompt_yes_no as_root "Run as root instead of an unprivileged user" \
+        "$([[ ${RUN_AS_USER:-} == root ]] && echo y || echo n)"
     if ((as_root)); then
         RUN_AS_USER=root
     else
         RUN_AS_USER="${RUN_AS_USER:-$DEFAULT_USER}"
+        [[ $RUN_AS_USER == root ]] && RUN_AS_USER=$DEFAULT_USER
     fi
 }
 
@@ -297,7 +354,7 @@ test_connection() {
     # Interactively, offer to continue: the broker may simply be down right now,
     # and the timer will retry. Non-interactively there is nobody to ask, and
     # silently installing a broken agent across a fleet is the worse outcome.
-    if ((TTY_AVAILABLE)) && [[ ${NON_INTERACTIVE:-0} != 1 ]]; then
+    if ((TTY_AVAILABLE)) && [[ ${NON_INTERACTIVE:-0} != 1 ]] && ((ASSUME_YES == 0)); then
         local proceed
         say ""
         prompt_yes_no proceed "Install anyway" "n"
@@ -595,16 +652,147 @@ cmd_uninstall() {
 
 # ---------------------------------------------------------------------------
 
+usage() {
+    cat <<'USAGE'
+hass-node-monitor installer
+
+  curl -fsSL https://raw.githubusercontent.com/mewejo/node-hass-monitoring/master/install.sh | sudo bash
+
+Prompts for MQTT connection details, installs a small agent and a systemd
+timer, and registers this machine with Home Assistant as an MQTT device
+reporting its temperatures. Installs no packages and works on any distro.
+
+Re-running is safe: it updates the code and leaves your settings alone.
+
+Presets (anything given here is not prompted for):
+  --host HOST            MQTT broker host
+  --port PORT            MQTT broker port (default 1883)
+  --user NAME            MQTT username (omit for anonymous)
+  --password PASS        MQTT password. Visible in `ps` and shell history;
+                         prefer --password-stdin.
+  --password-stdin       read the MQTT password from standard input
+  --tls / --no-tls       connect over TLS (default no)
+  --prefix PREFIX        Home Assistant discovery prefix (default homeassistant)
+  --interval SECONDS     reporting interval (default 60, minimum 10)
+  --run-as USER          account to run the service as, or "root"
+                         (default hass-node-monitor, unprivileged)
+  --ignore-pattern RE    regex of sensor chip names to skip
+
+Modes:
+  --yes, -y              accept defaults for anything not preset. Still asks
+                         for a password if a username needs one.
+  --reconfigure          re-prompt for connection details
+  --non-interactive      take settings from environment variables
+  --uninstall            remove everything, including entities in HA
+  --help, -h             show this
+
+Rolling out to a fleet, asked only for the password:
+
+  curl -fsSL .../install.sh | sudo bash -s -- \
+      --host hass.example.com --user node-health --yes
+
+Fully unattended, keeping the password out of the process list:
+
+  printf '%s' "$PASS" | curl -fsSL .../install.sh | sudo bash -s -- \
+      --host hass.example.com --user node-health --password-stdin --yes
+USAGE
+}
+
+# Records which settings came from the command line. Presets are used as given
+# and never prompted for, and they override anything already in config.env --
+# otherwise a wrong broker could not be corrected across a fleet without
+# visiting each node by hand.
+PRESET_KEYS=()
+ASSUME_YES=0
+declare -A PRESETS=()
+
+need_value() {
+    [[ $# -ge 2 && -n ${2-} && ${2:0:2} != "--" ]] ||
+        die "option $1 requires a value"
+}
+
+# Copy presets over whatever was loaded from config.env. Applied after loading
+# so a preset wins, which is what makes it possible to correct a wrong broker
+# across a fleet with a single re-run.
+apply_presets() {
+    local key
+    for key in "${!PRESETS[@]}"; do
+        case $key in
+        host) MQTT_HOST=${PRESETS[host]} ;;
+        port) MQTT_PORT=${PRESETS[port]} ;;
+        user) MQTT_USERNAME=${PRESETS[user]} ;;
+        password) MQTT_PASSWORD=${PRESETS[password]} ;;
+        tls) MQTT_TLS=${PRESETS[tls]} ;;
+        prefix) DISCOVERY_PREFIX=${PRESETS[prefix]} ;;
+        interval) INTERVAL=${PRESETS[interval]} ;;
+        run_as) RUN_AS_USER=${PRESETS[run_as]} ;;
+        ignore_pattern) IGNORE_PATTERN=${PRESETS[ignore_pattern]} ;;
+        esac
+        PRESET_KEYS+=("$key")
+    done
+}
+
 main() {
     local reconfigure=0 non_interactive=0
 
+
     while (($#)); do
         case "$1" in
+        --host)
+            need_value "$1" "${2-}"
+            PRESETS[host]=$2
+            shift
+            ;;
+        --port)
+            need_value "$1" "${2-}"
+            PRESETS[port]=$2
+            shift
+            ;;
+        --user | --username)
+            need_value "$1" "${2-}"
+            PRESETS[user]=$2
+            shift
+            ;;
+        --password)
+            # An empty password is meaningful (anonymous), so this one accepts
+            # an empty value rather than going through need_value.
+            [[ $# -ge 2 ]] || die "option $1 requires a value"
+            PRESETS[password]=$2
+            shift
+            ;;
+        --password-stdin)
+            # Keeps the password out of `ps` and shell history.
+            IFS= read -r "PRESETS[password]" || true
+            PRESET_KEYS+=(password)
+            ;;
+        --tls) PRESETS[tls]=1 ;;
+        --no-tls) PRESETS[tls]=0 ;;
+        --prefix)
+            need_value "$1" "${2-}"
+            PRESETS[prefix]=$2
+            shift
+            ;;
+        --interval)
+            need_value "$1" "${2-}"
+            PRESETS[interval]=$2
+            shift
+            ;;
+        --run-as)
+            need_value "$1" "${2-}"
+            PRESETS[run_as]=$2
+            shift
+            ;;
+        --ignore-pattern)
+            need_value "$1" "${2-}"
+            PRESETS[ignore_pattern]=$2
+            shift
+            ;;
+        --yes | -y) ASSUME_YES=1 ;;
         --uninstall) MODE=uninstall ;;
         --reconfigure) reconfigure=1 ;;
         --non-interactive) non_interactive=1 ;;
         --help | -h)
-            sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            usage
             exit 0
             ;;
         *) die "unknown option: $1" ;;
@@ -625,12 +813,23 @@ main() {
 
     local had_config=0
     load_existing_config && had_config=1
+    apply_presets
 
     if ((non_interactive)); then
         config_from_environment
     elif ((had_config)) && ((reconfigure == 0)); then
+        # An existing install keeps its settings, so re-running to pick up an
+        # update never re-asks anything. Presets still apply on top.
         step "Existing configuration found"
-        ok "keeping settings for ${MQTT_HOST}:${MQTT_PORT} (--reconfigure to change)"
+        if ((${#PRESET_KEYS[@]} > 0)); then
+            ok "applying presets, keeping other settings"
+        else
+            ok "keeping settings for ${MQTT_HOST}:${MQTT_PORT} (--reconfigure to change)"
+        fi
+        : "${MQTT_PORT:=1883}"
+        : "${MQTT_TLS:=0}"
+        : "${DISCOVERY_PREFIX:=homeassistant}"
+        : "${INTERVAL:=60}"
         : "${RUN_AS_USER:=$DEFAULT_USER}"
     else
         gather_config
